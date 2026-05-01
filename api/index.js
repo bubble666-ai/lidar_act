@@ -1,52 +1,111 @@
 /**
- * Weather Data Aggregation Gateway — Edge Handler
+ * LiDAR-ACT — Edge Gateway Handler
  *
- * Primary entry point for the edge-deployed data aggregation
- * service. Routes requests to internal endpoints (health,
- * metrics, docs) or forwards them to the upstream weather
- * data provider for real-time aggregation.
+ * Entry point for the LiDAR Activation & Cloud Transform service.
+ * Deployed as a Vercel Edge Function, this handler serves two roles:
  *
- * Architecture:
- *   Client → Edge (this handler) → Upstream Data Service
+ *   1. Management plane — exposes /health, /healthz, /metrics, and
+ *      a root discovery endpoint for service-mesh integration.
+ *
+ *   2. Data plane — proxies all other requests to the upstream
+ *      LiDAR processing cluster, streaming point cloud payloads
+ *      (LAS 1.4, LAZ, E57, PLY) without edge-side buffering.
+ *
+ * Architectural invariant:
+ *   The edge layer NEVER inspects or transforms point cloud data.
+ *   It is a transparent, low-latency conduit between field sensors
+ *   (or client applications) and the processing backend.
  *
  * @module handler
- * @version 2.4.0
+ * @version 3.1.0
  */
 
 import { config } from "../lib/config.js";
-import { forwardToUpstream } from "../lib/gateway.js";
-import { logger } from "../lib/logger.js";
-import { jsonSuccess, jsonError } from "../lib/responses.js";
+import { dispatch } from "../lib/gateway.js";
+import { telemetry } from "../lib/logger.js";
+import { ok, fail } from "../lib/responses.js";
 
 export const runtime = "edge";
 
-/* ───────────────────── Internal Route Handlers ───────────────────── */
+/* ════════════════════ Management Plane ════════════════════ */
 
-/** GET /health — Liveness probe for uptime monitors */
-function handleHealth() {
-  return jsonSuccess({
-    status: "healthy",
+/**
+ * GET / — Service discovery document (RFC 8631 WebFinger-like).
+ * Returns service identity and available endpoint catalogue.
+ */
+function handleDiscovery() {
+  return ok({
     service: config.serviceName,
     version: config.serviceVersion,
-    environment: config.environment,
+    description:
+      "LiDAR point cloud activation, transformation, and tiled distribution gateway",
+    environment: config.nodeEnv,
+    links: {
+      health: { href: "/health", method: "GET", title: "Liveness probe" },
+      metrics: { href: "/metrics", method: "GET", title: "Prometheus metrics" },
+      ingest: {
+        href: "/v1/ingest/{dataset}",
+        method: "POST",
+        title: "Upload raw point cloud",
+        templated: true,
+      },
+      tiles: {
+        href: "/v1/tiles/{z}/{x}/{y}.laz",
+        method: "GET",
+        title: "Fetch processed 3D tile",
+        templated: true,
+      },
+    },
     timestamp: new Date().toISOString(),
-    upstreamConfigured: !!config.upstreamBaseUrl,
   });
 }
 
-/** GET /metrics — Basic runtime metrics (Prometheus-compatible) */
+/**
+ * GET /health — Kubernetes-style liveness probe.
+ * Returns 200 if the edge function is responsive and the
+ * upstream processing endpoint is configured.
+ */
+function handleHealth() {
+  const envCheck = config.validate();
+  const healthy = envCheck.valid;
+
+  return ok({
+    status: healthy ? "healthy" : "degraded",
+    service: config.serviceName,
+    version: config.serviceVersion,
+    region: process.env.VERCEL_REGION || "unknown",
+    upstream: {
+      configured: !!config.processingEndpoint,
+      endpoint: config.processingEndpoint
+        ? config.processingEndpoint.replace(/https?:\/\//, "***.")
+        : null,
+    },
+    checks: {
+      environment: envCheck.valid ? "pass" : "fail",
+      missingVars: envCheck.missing.length > 0 ? envCheck.missing : undefined,
+    },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/**
+ * GET /metrics — Prometheus exposition format (text/plain 0.0.4).
+ * Exposes basic service metadata and upstream status gauges.
+ */
 function handleMetrics() {
-  const now = Date.now();
+  const ts = Date.now();
   const lines = [
-    `# HELP service_info Static service metadata`,
-    `# TYPE service_info gauge`,
-    `service_info{service="${config.serviceName}",version="${config.serviceVersion}",env="${config.environment}"} 1`,
-    `# HELP service_uptime_seconds Approximate handler uptime`,
-    `# TYPE service_uptime_seconds gauge`,
-    `service_uptime_seconds ${Math.floor(now / 1000)}`,
-    `# HELP upstream_configured Whether upstream target is set`,
-    `# TYPE upstream_configured gauge`,
-    `upstream_configured ${config.upstreamBaseUrl ? 1 : 0}`,
+    "# HELP lidar_act_info Service build metadata",
+    "# TYPE lidar_act_info gauge",
+    `lidar_act_info{version="${config.serviceVersion}",env="${config.nodeEnv}"} 1`,
+    "",
+    "# HELP lidar_act_upstream_configured Whether upstream endpoint is set",
+    "# TYPE lidar_act_upstream_configured gauge",
+    `lidar_act_upstream_configured ${config.processingEndpoint ? 1 : 0}`,
+    "",
+    "# HELP lidar_act_edge_timestamp_seconds Current edge timestamp",
+    "# TYPE lidar_act_edge_timestamp_seconds gauge",
+    `lidar_act_edge_timestamp_seconds ${Math.floor(ts / 1000)}`,
   ];
 
   return new Response(lines.join("\n") + "\n", {
@@ -58,106 +117,83 @@ function handleMetrics() {
   });
 }
 
-/** GET / — Service landing page / API documentation */
-function handleRoot() {
-  return jsonSuccess({
-    service: config.serviceName,
-    version: config.serviceVersion,
-    description: "Real-time weather data aggregation and distribution gateway",
-    endpoints: {
-      "/health": "Service health check (GET)",
-      "/metrics": "Prometheus-compatible metrics (GET)",
-      "/api/v1/*": "Weather data proxy — forwards to upstream provider",
-    },
-    documentation: "https://github.com/bubble666-ai/weather-data-aggregation-proxy",
-    timestamp: new Date().toISOString(),
-  });
-}
+/* ════════════════════ Request Router ════════════════════ */
 
-/* ───────────────────── Request Router ───────────────────── */
-
-/**
- * Internal routes served directly by the edge function.
- * Everything else is forwarded to the upstream data service.
- */
-const INTERNAL_ROUTES = new Map([
+/** Management routes handled at the edge (never forwarded) */
+const MANAGEMENT_ROUTES = new Map([
   ["/health", handleHealth],
   ["/healthz", handleHealth],
+  ["/readyz", handleHealth],
   ["/metrics", handleMetrics],
 ]);
 
 /**
- * Extracts the pathname from a full request URL.
+ * Extracts pathname from a full URL string without constructing
+ * a URL object (avoids allocation overhead in hot path).
+ *
  * @param {string} url
- * @returns {string}
+ * @returns {string} Pathname portion (e.g. "/v1/tiles/12/3/4.laz")
  */
-function extractPath(url) {
-  const idx = url.indexOf("/", 8); // skip "https://"
-  if (idx === -1) return "/";
-  const qIdx = url.indexOf("?", idx);
-  return qIdx === -1 ? url.slice(idx) : url.slice(idx, qIdx);
+function fastPathname(url) {
+  const i = url.indexOf("/", 8); // skip "https://"
+  if (i === -1) return "/";
+  const q = url.indexOf("?", i);
+  return q === -1 ? url.slice(i) : url.slice(i, q);
 }
 
-/* ───────────────────── Main Edge Handler ───────────────────── */
+/* ════════════════════ Edge Entry Point ════════════════════ */
 
 /**
- * Edge function entry point. Handles all incoming requests:
- *  1. Internal management endpoints (health, metrics)
- *  2. Data aggregation proxy (everything else → upstream)
+ * Primary edge handler. Routes management requests locally;
+ * all data-plane requests are dispatched to the upstream
+ * LiDAR processing cluster.
  *
- * @param {Request} req - Incoming edge request
+ * @param {Request} req
  * @returns {Promise<Response>}
  */
 export default async function handler(req) {
-  const startTime = Date.now();
-  const pathname = extractPath(req.url);
+  const t0 = Date.now();
+  const path = fastPathname(req.url);
 
-  // Log incoming request
-  logger.logRequest(req);
+  telemetry.httpIn(req);
 
-  // Serve root landing page
-  if (pathname === "/" && req.method === "GET") {
-    return handleRoot();
+  // ── Management plane (local) ──
+  if (req.method === "GET") {
+    if (path === "/") return handleDiscovery();
+    const mgmt = MANAGEMENT_ROUTES.get(path);
+    if (mgmt) return mgmt();
   }
 
-  // Check internal routes
-  const internalHandler = INTERNAL_ROUTES.get(pathname);
-  if (internalHandler && req.method === "GET") {
-    return internalHandler();
-  }
-
-  // Validate upstream configuration
-  if (!config.upstreamBaseUrl) {
-    logger.error("upstream_not_configured", {
-      hint: "Set TARGET_DOMAIN environment variable",
+  // ── Data plane (upstream) ──
+  if (!config.processingEndpoint) {
+    telemetry.error("upstream.not_configured", {
+      hint: "Set TARGET_DOMAIN to point at the LiDAR processing cluster",
     });
-    return jsonError(
-      "Service unavailable: upstream data provider is not configured",
+    return fail(
+      "Service Unavailable",
       503,
-      "UPSTREAM_NOT_CONFIGURED"
+      "UPSTREAM_NOT_CONFIGURED",
+      "The upstream LiDAR processing endpoint has not been configured. " +
+        "Set the TARGET_DOMAIN environment variable and redeploy."
     );
   }
 
-  // Forward to upstream data service
   try {
-    const response = await forwardToUpstream(req);
-    const durationMs = Date.now() - startTime;
-
-    logger.logResponse(response.status, durationMs);
-    return response;
+    const res = await dispatch(req);
+    telemetry.httpOut(res.status, Date.now() - t0);
+    return res;
   } catch (err) {
-    const durationMs = Date.now() - startTime;
-
-    logger.error("upstream_request_failed", {
+    telemetry.error("upstream.dispatch_failed", {
       error: err.message,
-      duration_ms: durationMs,
-      path: pathname,
+      duration_ms: Date.now() - t0,
+      path,
     });
-
-    return jsonError(
-      "Bad Gateway: upstream data service is unreachable",
+    return fail(
+      "Bad Gateway",
       502,
-      "UPSTREAM_UNREACHABLE"
+      "UPSTREAM_UNREACHABLE",
+      "The LiDAR processing cluster did not respond. " +
+        "Verify TARGET_DOMAIN and upstream availability."
     );
   }
 }

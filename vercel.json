@@ -1,13 +1,13 @@
 {
   "version": 2,
-  "name": "weather-data-aggregation-proxy",
-  "regions": ["iad1", "cdg1", "hnd1"],
+  "name": "lidar-act-gateway",
+  "regions": ["iad1", "cdg1", "hnd1", "syd1"],
   "rewrites": [
     { "source": "/(.*)", "destination": "/api/index" }
   ],
   "headers": [
     {
-      "source": "/health",
+      "source": "/health(z)?",
       "headers": [
         { "key": "Cache-Control", "value": "no-store, must-revalidate" }
       ]
@@ -16,6 +16,13 @@
       "source": "/metrics",
       "headers": [
         { "key": "Cache-Control", "value": "no-store" }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Powered-By", "value": "LiDAR-ACT/3.1" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
       ]
     }
   ],

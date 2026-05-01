@@ -1,107 +1,119 @@
-# @weatherstack/data-aggregation-proxy
+# LiDAR-ACT
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/bubble666-ai/weather-data-aggregation-proxy)
+**LiDAR Activation & Cloud Transform** — an edge-deployed gateway for real-time LiDAR point cloud ingestion, activation, and tiled distribution.
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/bubble666-ai/lidar_act)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
-![Runtime](https://img.shields.io/badge/runtime-Vercel%20Edge-black)
-
-A production-grade **weather data aggregation gateway** deployed on Vercel Edge Functions. Aggregates and distributes real-time weather data from upstream providers with ultra-low latency through a global edge network.
+![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen)
+![Edge Runtime](https://img.shields.io/badge/runtime-Vercel%20Edge-black)
+![Version](https://img.shields.io/badge/version-3.1.0-blue)
 
 ---
 
-## Table of Contents
+## Overview
 
-- [Architecture](#architecture)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [Configuration](#configuration)
-- [API Reference](#api-reference)
-- [Monitoring](#monitoring)
-- [Deployment](#deployment)
-- [Performance](#performance)
-- [Contributing](#contributing)
-- [License](#license)
+LiDAR-ACT provides a globally distributed edge layer between LiDAR field sensors (or client applications) and your point cloud processing backend. It acts as a transparent, low-latency conduit — the edge never inspects or transforms the actual point cloud data.
+
+**Supported formats:** LAS 1.2–1.4 · LAZ · E57 · PLY · 3D Tiles (Cesium)
 
 ---
 
 ## Architecture
 
 ```
-                        ┌─────────────────────────────────────────┐
-                        │           Vercel Edge Network           │
-┌──────────┐            │  ┌───────────┐    ┌──────────────────┐  │    ┌────────────┐
-│  Client  │── HTTPS ──►│  │  Router   │───►│  Data Gateway    │──│───►│  Upstream   │
-│ (Mobile/ │            │  │           │    │  (stream proxy)  │  │    │  Weather    │
-│  Web/IoT)│◄── JSON ──│  │  /health  │    │                  │◄─│────│  Provider   │
-└──────────┘            │  │  /metrics │    └──────────────────┘  │    └────────────┘
-                        │  └───────────┘                          │
-                        │         iad1 · cdg1 · hnd1              │
-                        └─────────────────────────────────────────┘
+          Field Sensors / Client Apps
+                    │
+                    │ HTTPS (TLS 1.3)
+                    ▼
+    ┌───────────────────────────────────────┐
+    │         Vercel Edge Network           │
+    │                                       │
+    │  ┌─────────────┐  ┌───────────────┐   │
+    │  │  Management  │  │  Data Plane   │   │
+    │  │    Plane     │  │  (streaming   │   │
+    │  │             │  │   gateway)    │   │
+    │  │  /health    │  │               │   │
+    │  │  /metrics   │  │  /v1/ingest/* │   │
+    │  │  /readyz    │  │  /v1/tiles/*  │   │
+    │  └─────────────┘  └───────┬───────┘   │
+    │     iad1 · cdg1 · hnd1 · syd1         │
+    └───────────────────────────┼───────────┘
+                                │
+                                │ HTTPS (streamed, unbuffered)
+                                ▼
+                    ┌───────────────────┐
+                    │  LiDAR Processing │
+                    │     Cluster       │
+                    │                   │
+                    │  Point cloud      │
+                    │  tiling, filtering │
+                    │  classification   │
+                    └───────────────────┘
 ```
 
-**Data Flow:**
-1. Client sends an API request to the nearest edge node
-2. Edge router handles internal endpoints (`/health`, `/metrics`) locally
-3. Data requests are forwarded to the upstream weather provider
-4. Responses are streamed back without buffering for real-time telemetry
+### Design Principles
 
----
-
-## Features
-
-| Feature | Description |
-|---|---|
-| ⚡ **Edge-Native** | Runs on Vercel's edge runtime — cold starts under 5ms |
-| 🌍 **Multi-Region** | Deployed to IAD (US-East), CDG (Europe), HND (Asia-Pacific) |
-| 📡 **Real-Time Streaming** | Full-duplex streaming via `ReadableStream` / `half-duplex` fetch |
-| 🔒 **Header Sanitization** | RFC 7230 compliant hop-by-hop header removal |
-| 📊 **Prometheus Metrics** | Built-in `/metrics` endpoint for observability |
-| 🏥 **Health Checks** | `/health` and `/healthz` for uptime monitoring |
-| 📝 **Structured Logging** | JSON log output compatible with Vercel Log Drains |
-| 🧩 **Modular Architecture** | Clean separation: config, sanitizer, gateway, logger, responses |
-| 0️⃣ **Zero Dependencies** | Pure Web Standards API — no npm packages required |
+1. **Zero buffering** — Point cloud payloads are streamed through the edge without being held in memory. This is critical for multi-GB `.las` uploads.
+2. **Transparent proxy** — The edge layer adds no transformation. Data integrity is preserved byte-for-byte.
+3. **Multi-region** — Deployed to 4 edge regions (US-East, Europe, Asia-Pacific, Oceania) for global sensor coverage.
+4. **Separation of concerns** — Management plane (health, metrics) is handled locally at the edge; data plane is forwarded upstream.
 
 ---
 
 ## Project Structure
 
 ```
+lidar_act/
 ├── api/
-│   └── index.js              # Edge handler — request router + gateway
+│   └── index.js              # Edge handler — router + dispatch
 ├── lib/
-│   ├── config.js              # Environment & service configuration
-│   ├── gateway.js             # Upstream request forwarding (streaming)
-│   ├── sanitizer.js           # HTTP header sanitization (RFC 7230)
-│   ├── logger.js              # Structured JSON logging
-│   └── responses.js           # Standard API response builders (JSend)
+│   ├── config.js              # Environment & runtime configuration
+│   ├── gateway.js             # Upstream dispatch (streaming proxy)
+│   ├── sanitizer.js           # RFC 7230 header sanitization
+│   ├── logger.js              # OpenTelemetry-aligned telemetry
+│   └── responses.js           # JSON:API response envelope builders
+├── .gitignore
+├── LICENSE
 ├── package.json
-├── vercel.json                # Edge routing, regions & headers
+├── vercel.json                # Edge routing, regions, headers
 └── README.md
+```
+
+### Module Dependency Graph
+
+```
+index.js
+  ├── config.js          (env vars, feature flags)
+  ├── gateway.js         (upstream dispatch)
+  │     ├── config.js
+  │     └── sanitizer.js (header cleaning, RFC 7230)
+  ├── logger.js          (structured telemetry)
+  │     └── config.js
+  └── responses.js       (JSON:API envelopes)
 ```
 
 ---
 
-## Getting Started
+## Quick Start
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org) v18+
+- [Node.js](https://nodejs.org) v18.17+
 - [Vercel CLI](https://vercel.com/docs/cli) (`npm i -g vercel`)
-- An upstream weather data API endpoint
+- A LiDAR processing backend (e.g., [PDAL](https://pdal.io)-based tile server)
 
-### Quick Start
+### Deploy
 
 ```bash
-# Clone
-git clone https://github.com/bubble666-ai/weather-data-aggregation-proxy.git
-cd weather-data-aggregation-proxy
+# 1. Clone
+git clone https://github.com/bubble666-ai/lidar_act.git
+cd lidar_act
 
-# Set upstream provider URL
+# 2. Set upstream processing cluster URL
 vercel env add TARGET_DOMAIN
-# → Enter: https://your-weather-backend.example.com
+# → Enter: https://lidar-processing.example.com
 
-# Deploy to production
+# 3. Deploy
 vercel --prod
 ```
 
@@ -109,190 +121,151 @@ vercel --prod
 
 ## Configuration
 
-All configuration is managed through environment variables:
-
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TARGET_DOMAIN` | ✅ | — | Full URL of the upstream weather data provider |
-| `SERVICE_NAME` | ❌ | `weather-data-aggregation-proxy` | Service identifier for logs |
-| `SERVICE_VERSION` | ❌ | `2.4.0` | Reported version in health checks |
-| `ENABLE_LOGGING` | ❌ | `true` | Enable/disable structured request logging |
-| `ENABLE_METRICS` | ❌ | `true` | Enable/disable metrics endpoint |
-| `UPSTREAM_TIMEOUT_MS` | ❌ | `25000` | Upstream request timeout in milliseconds |
-
-### Setting Environment Variables
-
-```bash
-# Via CLI
-vercel env add TARGET_DOMAIN
-
-# Or via Vercel Dashboard
-# Project → Settings → Environment Variables
-```
+| `TARGET_DOMAIN` | ✅ | — | URL of the upstream LiDAR processing cluster |
+| `SERVICE_NAME` | — | `lidar-act` | Service identifier in logs & metrics |
+| `TELEMETRY` | — | `true` | Enable/disable structured logging |
+| `VERBOSE` | — | `false` | Enable DEBUG-level log output |
+| `UPSTREAM_TIMEOUT_MS` | — | `25000` | Upstream request timeout (ms) |
+| `MAX_PAYLOAD_BYTES` | — | `10485760` | Payload size hint (informational) |
 
 ---
 
 ## API Reference
 
-### `GET /`
-Service information and available endpoints.
+### Management Plane
 
-```bash
-curl https://your-project.vercel.app/
-```
+#### `GET /`
+Service discovery document with endpoint catalogue.
 
 ```json
 {
-  "status": "success",
+  "meta": { "status": "ok" },
   "data": {
-    "service": "weather-data-aggregation-proxy",
-    "version": "2.4.0",
-    "description": "Real-time weather data aggregation and distribution gateway",
-    "endpoints": {
-      "/health": "Service health check (GET)",
-      "/metrics": "Prometheus-compatible metrics (GET)",
-      "/api/v1/*": "Weather data proxy — forwards to upstream provider"
+    "service": "lidar-act",
+    "version": "3.1.0",
+    "links": {
+      "health": { "href": "/health" },
+      "metrics": { "href": "/metrics" },
+      "ingest": { "href": "/v1/ingest/{dataset}", "templated": true },
+      "tiles": { "href": "/v1/tiles/{z}/{x}/{y}.laz", "templated": true }
     }
   }
 }
 ```
 
-### `GET /health`
-Liveness probe for uptime monitors and load balancers.
+#### `GET /health` · `GET /healthz` · `GET /readyz`
+Kubernetes-compatible liveness/readiness probe.
 
 ```bash
-curl https://your-project.vercel.app/health
+curl https://lidar-act.vercel.app/health
 ```
 
-```json
-{
-  "status": "success",
-  "data": {
-    "status": "healthy",
-    "service": "weather-data-aggregation-proxy",
-    "version": "2.4.0",
-    "upstreamConfigured": true,
-    "timestamp": "2025-01-15T10:30:00.000Z"
-  }
-}
+#### `GET /metrics`
+Prometheus exposition format (text/plain 0.0.4).
+
+```
+# HELP lidar_act_info Service build metadata
+# TYPE lidar_act_info gauge
+lidar_act_info{version="3.1.0",env="production"} 1
+# HELP lidar_act_upstream_configured Whether upstream is set
+# TYPE lidar_act_upstream_configured gauge
+lidar_act_upstream_configured 1
 ```
 
-### `GET /metrics`
-Prometheus-compatible metrics output.
+### Data Plane
+
+All non-management requests are transparently forwarded to `TARGET_DOMAIN`:
 
 ```bash
-curl https://your-project.vercel.app/metrics
-```
+# Upload a point cloud
+curl -X POST \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @scan.laz \
+  https://lidar-act.vercel.app/v1/ingest/site-42
 
-```
-# HELP service_info Static service metadata
-# TYPE service_info gauge
-service_info{service="weather-data-aggregation-proxy",version="2.4.0",env="production"} 1
-# HELP upstream_configured Whether upstream target is set
-# TYPE upstream_configured gauge
-upstream_configured 1
-```
-
-### `* /**`
-All other requests are forwarded to the upstream weather data provider. The gateway preserves the original path, query parameters, method, and headers.
-
-```bash
-# Example: fetch current weather
-curl https://your-project.vercel.app/api/v1/current?city=london
-
-# Example: stream live forecast
-curl https://your-project.vercel.app/api/v1/forecast/stream?lat=35.6&lon=139.7
+# Fetch a processed 3D tile
+curl https://lidar-act.vercel.app/v1/tiles/14/8192/5461.laz -o tile.laz
 ```
 
 ---
 
-## Monitoring
+## Observability
 
-### Health Checks
+### Health Monitoring
 
-Configure your uptime monitor (UptimeRobot, Pingdom, etc.) to poll:
+Configure your uptime monitor to poll `/health`:
 ```
-GET https://your-project.vercel.app/health
+GET https://your-deployment.vercel.app/health
+Expected: 200 OK, data.status = "healthy"
 ```
-Expected: `200 OK` with `status: "healthy"`
 
-### Prometheus / Grafana
+### Prometheus Scrape Config
 
-Scrape the metrics endpoint:
 ```yaml
-# prometheus.yml
 scrape_configs:
-  - job_name: 'weather-gateway'
+  - job_name: lidar-act
+    scheme: https
+    metrics_path: /metrics
     scrape_interval: 30s
     static_configs:
-      - targets: ['your-project.vercel.app']
-    metrics_path: '/metrics'
-    scheme: 'https'
+      - targets: ['your-deployment.vercel.app']
 ```
 
-### Log Drains
+### Log Format
 
-Structured JSON logs are compatible with Vercel Log Drains → forward to Datadog, Logflare, or any SIEM.
+All logs are emitted as NDJSON and follow OpenTelemetry semantic conventions:
+
+```json
+{"ts":"2025-01-15T10:30:00.000Z","sev":"INFO","svc":"lidar-act","ver":"3.1.0","evt":"http.request.in","http.method":"POST","http.target":"/v1/ingest/site-42"}
+```
+
+Compatible with Vercel Log Drains → Datadog, Grafana Loki, or any SIEM.
 
 ---
 
-## Deployment
+## Deployment Regions
 
-### Multi-Region
-
-The service is configured to deploy to three edge regions for global coverage:
-
-| Region | Location | Code |
-|---|---|---|
-| US East | Washington, D.C. | `iad1` |
-| Europe | Paris | `cdg1` |
-| Asia Pacific | Tokyo | `hnd1` |
-
-Requests are automatically routed to the nearest edge node.
-
-### Production Deploy
-
-```bash
-vercel --prod
-```
-
-### Preview Deploy
-
-```bash
-vercel
-```
+| Region | Location | Code | Latency Target |
+|---|---|---|---|
+| US East | Ashburn, VA | `iad1` | Americas |
+| Europe | Paris, FR | `cdg1` | EMEA |
+| Asia Pacific | Tokyo, JP | `hnd1` | APAC |
+| Oceania | Sydney, AU | `syd1` | Oceania |
 
 ---
 
-## Performance
+## Performance Characteristics
 
 | Metric | Value |
 |---|---|
-| Cold start | < 5ms (edge runtime) |
-| Header processing | < 0.1ms |
-| Upstream forwarding | Network-bound (no buffering) |
-| Response streaming | Zero-copy pass-through |
-| Bundle size | ~3 KB (no dependencies) |
+| Cold start | < 5 ms (edge runtime, no node_modules) |
+| Header processing | < 0.1 ms |
+| Payload streaming | Zero-copy pass-through (no buffering) |
+| Bundle size | ~4 KB total (zero npm dependencies) |
+| Max streaming duration | 300 s (Vercel edge limit) |
 
 ---
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/improvement`)
-3. Write clean, documented code following the existing module pattern
-4. Test with `vercel dev` locally
-5. Submit a Pull Request
+1. Fork → branch → commit → PR
+2. Follow the existing modular pattern (one concern per file in `lib/`)
+3. All exported functions must have JSDoc
+4. Test locally with `vercel dev`
 
-### Code Style
+---
 
-- ES Modules (`import/export`)
-- JSDoc for all exported functions
-- Structured logging (no `console.log` in business logic)
-- Standard JSON responses via `lib/responses.js`
+## Related Projects
+
+- [PDAL](https://pdal.io) — Point Data Abstraction Library
+- [Entwine](https://entwine.io) — Point cloud indexing
+- [Cesium 3D Tiles](https://cesium.com/platform/cesium-ion/3d-tiling/) — OGC 3D Tiles
+- [Potree](https://potree.github.io/) — WebGL point cloud renderer
 
 ---
 
 ## License
 
-MIT — see [LICENSE](./LICENSE) for details.
+[MIT](./LICENSE)

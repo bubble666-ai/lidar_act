@@ -1,31 +1,35 @@
 {
-  "name": "@weatherstack/data-aggregation-proxy",
-  "version": "2.4.0",
-  "description": "Edge-deployed weather data aggregation and distribution gateway with real-time streaming support",
+  "name": "@lidar-act/edge-gateway",
+  "version": "3.1.0",
+  "description": "Edge-deployed gateway for LiDAR point cloud activation, transformation, and tiled distribution",
   "private": true,
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.17.0"
   },
   "keywords": [
-    "weather",
-    "api-gateway",
+    "lidar",
+    "point-cloud",
+    "las",
+    "laz",
+    "e57",
+    "3d-tiles",
     "edge-functions",
-    "data-aggregation",
-    "vercel",
-    "streaming",
-    "proxy",
-    "microservice"
+    "geospatial",
+    "remote-sensing",
+    "api-gateway",
+    "streaming"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/bubble666-ai/weather-data-aggregation-proxy"
+    "url": "https://github.com/bubble666-ai/lidar_act.git"
   },
-  "author": "weatherstack team",
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod",
-    "lint": "echo 'no linter configured'"
+    "deploy:preview": "vercel",
+    "logs": "vercel logs --follow",
+    "lint": "echo 'TODO: configure eslint'"
   }
 }
