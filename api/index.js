@@ -20,12 +20,12 @@
  * @version 3.1.0
  */
 
-import { config } from "../lib/config.js";
+import { config as appConfig } from "../lib/config.js";
 import { dispatch } from "../lib/gateway.js";
 import { telemetry } from "../lib/logger.js";
 import { ok, fail } from "../lib/responses.js";
 
-export const runtime = "edge";
+export const config = { runtime: "edge" };
 
 /* ════════════════════ Management Plane ════════════════════ */
 
@@ -35,11 +35,11 @@ export const runtime = "edge";
  */
 function handleDiscovery() {
   return ok({
-    service: config.serviceName,
-    version: config.serviceVersion,
+    service: appConfig.serviceName,
+    version: appConfig.serviceVersion,
     description:
       "LiDAR point cloud activation, transformation, and tiled distribution gateway",
-    environment: config.nodeEnv,
+    environment: appConfig.nodeEnv,
     links: {
       health: { href: "/health", method: "GET", title: "Liveness probe" },
       metrics: { href: "/metrics", method: "GET", title: "Prometheus metrics" },
@@ -66,18 +66,18 @@ function handleDiscovery() {
  * upstream processing endpoint is configured.
  */
 function handleHealth() {
-  const envCheck = config.validate();
+  const envCheck = appConfig.validate();
   const healthy = envCheck.valid;
 
   return ok({
     status: healthy ? "healthy" : "degraded",
-    service: config.serviceName,
-    version: config.serviceVersion,
+    service: appConfig.serviceName,
+    version: appConfig.serviceVersion,
     region: process.env.VERCEL_REGION || "unknown",
     upstream: {
-      configured: !!config.processingEndpoint,
-      endpoint: config.processingEndpoint
-        ? config.processingEndpoint.replace(/https?:\/\//, "***.")
+      configured: !!appConfig.processingEndpoint,
+      endpoint: appConfig.processingEndpoint
+        ? appConfig.processingEndpoint.replace(/https?:\/\//, "***.")
         : null,
     },
     checks: {
@@ -97,11 +97,11 @@ function handleMetrics() {
   const lines = [
     "# HELP lidar_act_info Service build metadata",
     "# TYPE lidar_act_info gauge",
-    `lidar_act_info{version="${config.serviceVersion}",env="${config.nodeEnv}"} 1`,
+    `lidar_act_info{version="${appConfig.serviceVersion}",env="${appConfig.nodeEnv}"} 1`,
     "",
     "# HELP lidar_act_upstream_configured Whether upstream endpoint is set",
     "# TYPE lidar_act_upstream_configured gauge",
-    `lidar_act_upstream_configured ${config.processingEndpoint ? 1 : 0}`,
+    `lidar_act_upstream_configured ${appConfig.processingEndpoint ? 1 : 0}`,
     "",
     "# HELP lidar_act_edge_timestamp_seconds Current edge timestamp",
     "# TYPE lidar_act_edge_timestamp_seconds gauge",
@@ -165,7 +165,7 @@ export default async function handler(req) {
   }
 
   // ── Data plane (upstream) ──
-  if (!config.processingEndpoint) {
+  if (!appConfig.processingEndpoint) {
     telemetry.error("upstream.not_configured", {
       hint: "Set TARGET_DOMAIN to point at the LiDAR processing cluster",
     });
